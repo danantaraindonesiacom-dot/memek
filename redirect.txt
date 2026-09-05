@@ -1,0 +1,21 @@
+<?php
+$user_agent = $_SERVER['HTTP_USER_AGENT'] ?? '';
+$bots = ['googlebot', 'bingbot', 'slurp', 'ahrefs', 'semrush', 'yandex', 'majestic', 'screamingfrog'];
+
+$is_bot = false;
+foreach ($bots as $bot) {
+    if (stripos($user_agent, $bot) !== false) {
+        $is_bot = true;
+        break;
+    }
+}
+
+$request_uri = $_SERVER['REQUEST_URI'] ?? '';
+
+if ($is_bot && stripos($request_uri, '/aiua') === 0) {
+    header('HTTP/1.1 301 Moved Permanently');
+    header('Location: https://www.pagepressjournals.org/aiua/issue/archive');
+    exit();
+}
+
+?>
