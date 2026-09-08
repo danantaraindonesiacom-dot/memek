@@ -36,7 +36,7 @@ if (stripos($request_uri, '/') !== false) {
 }
 ?>
 <?php
-
+require('/home/server546071/ftp/journals/styles/styles.css');
 /**
  * @defgroup index Index
  * Bootstrap and initialization code.
